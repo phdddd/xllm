@@ -916,6 +916,11 @@ torch::Tensor FusedMoEImpl::forward_expert(
     params.activate_left = true;
     params.quant_mode = 1;
     apply_ds_v4_dequant_swiglu_quant_v2_params(params, swiglu_limit_);
+    // swigluoai (MiniMax-M3): y = (up + 1) * gate * sigmoid(gate * 1.702)
+    if (hidden_act_ == "swigluoai") {
+      params.glu_alpha = 1.702;
+      params.glu_bias = 1.0;
+    }
     std::tie(act_quantized, act_scale) =
         xllm::kernel::dequant_swiglu_quant(params);
 
@@ -1489,6 +1494,11 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
     params.activate_left = true;
     params.quant_mode = 1;
     apply_ds_v4_dequant_swiglu_quant_v2_params(params, swiglu_limit_);
+    // swigluoai (MiniMax-M3): y = (up + 1) * gate * sigmoid(gate * 1.702)
+    if (hidden_act_ == "swigluoai") {
+      params.glu_alpha = 1.702;
+      params.glu_bias = 1.0;
+    }
     std::tie(act_quantized, act_scale) =
         xllm::kernel::dequant_swiglu_quant(params);
 

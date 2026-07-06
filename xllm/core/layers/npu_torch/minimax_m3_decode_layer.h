@@ -49,7 +49,6 @@ class MiniMaxM3DecoderLayerImpl final : public torch::nn::Module {
   bool is_moe_layer_ = false;
   bool enable_weight_dequant_ = false;
   bool use_e8m0_scale_ = false;
-  bool enable_w8a8_dequant_ = false;
 };
 TORCH_MODULE(MiniMaxM3DecoderLayer);
 
