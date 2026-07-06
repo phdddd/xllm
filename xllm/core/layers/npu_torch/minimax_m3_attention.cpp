@@ -109,7 +109,8 @@ MiniMaxM3AttentionImpl::MiniMaxM3AttentionImpl(const ModelContext& context,
                                                        /*bias=*/false,
                                                        /*gather_output=*/false,
                                                        parallel_args,
-                                                       options));
+                                                       options,
+                                                       quant_args));
 
   use_sparse_attention_ = is_minimax_sparse_layer(args, layer_id);
   if (use_sparse_attention_) {

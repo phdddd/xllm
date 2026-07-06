@@ -189,6 +189,18 @@ std::string to_lower_copy(std::string value) {
   return value;
 }
 
+bool is_w8a8_dynamic_quantize_type_or_method(const QuantArgs& quant_args) {
+  const std::string quantize_type = to_lower_copy(quant_args.quantize_type());
+  if (quantize_type == "w8a8_dynamic" || quantize_type == "w8a8") {
+    return true;
+  }
+  const std::string quant_method = to_lower_copy(quant_args.quant_method());
+  if (quant_method == "w8a8_dynamic" || quant_method == "w8a8") {
+    return true;
+  }
+  return false;
+}
+
 void resolve_weight_quant_method_for_linear_load(
     const QuantArgs& quant_args,
     const StateDict& state_dict,
@@ -229,6 +241,31 @@ void resolve_weight_quant_method_for_linear_load(
                     "quant method was not resolved from state_dict prefixes. "
                     "state_dict.prefix="
                  << state_dict.prefix();
+  }
+  // Fallback: check quantize_type / quant_method when quant_descs is empty.
+  // Also verify checkpoint tensors to avoid false positives on non-quantized
+  // layers (e.g., MoE gate/router, non-quantized projections).
+  if (is_w8a8_dynamic_quantize_type_or_method(quant_args)) {
+    bool is_w8a8_dynamic = false;
+    if (prefixes.empty()) {
+      torch::Tensor weight = state_dict.get_tensor("weight");
+      is_w8a8_dynamic = state_dict.has("weight_scale") && weight.defined() &&
+                        weight.scalar_type() == torch::kInt8;
+    } else {
+      is_w8a8_dynamic = true;
+      for (const std::string& prefix : prefixes) {
+        torch::Tensor weight = state_dict.get_tensor(prefix + "weight");
+        if (!state_dict.has(prefix + "weight_scale") || !weight.defined() ||
+            weight.scalar_type() != torch::kInt8) {
+          is_w8a8_dynamic = false;
+          break;
+        }
+      }
+    }
+    if (is_w8a8_dynamic) {
+      resolved_weight_quant_method = "w8a8_dynamic";
+      return;
+    }
   }
   resolved_weight_quant_method = std::nullopt;
 }
@@ -294,7 +331,8 @@ void ensure_w8a8_params_for_linear_load(
   if (!is_w8a8_quant(resolved_weight_quant_method) &&
       !is_w8a8_dynamic_quant(resolved_weight_quant_method)) {
     if (!quant_args.quant_descs().empty() ||
-        quant_args.is_compressed_tensors_w8a8_dynamic()) {
+        quant_args.is_compressed_tensors_w8a8_dynamic() ||
+        is_w8a8_dynamic_quantize_type_or_method(quant_args)) {
       // Quant args indicated a checkpoint that may be quantized, so the
       // constructor initialized weights as kInt8. If the actual checkpoint is
       // not resolved to a W8A8 method, re-register the weight in the original
@@ -581,10 +619,11 @@ ColumnParallelLinearImpl::ColumnParallelLinearImpl(
                              /*requires_grad=*/false);
     }
   } else if (!quant_args_.quant_descs().empty() ||
-             quant_args_.is_compressed_tensors_w8a8_dynamic()) {
-    // quant_descs is not empty: default initialize weight as kInt8.
-    // During load_state_dict, the weight will be lazily re-registered to the
-    // appropriate dtype based on the resolved quant method.
+             quant_args_.is_compressed_tensors_w8a8_dynamic() ||
+             is_w8a8_dynamic_quantize_type_or_method(quant_args_)) {
+    // quant_descs is not empty or W8A8_DYNAMIC: default initialize weight as
+    // kInt8. During load_state_dict, the weight will be lazily re-registered
+    // to the appropriate dtype based on the resolved quant method.
     weight_ = register_parameter(
         "weight",
         torch::empty({out_features_per_partition, in_features},
@@ -1049,10 +1088,11 @@ QKVParallelLinearImpl::QKVParallelLinearImpl(
                              /*requires_grad=*/false);
     }
   } else if (!quant_args_.quant_descs().empty() ||
-             quant_args_.is_compressed_tensors_w8a8_dynamic()) {
-    // quant_descs is not empty: default initialize weight as kInt8.
-    // During load_state_dict, the weight will be lazily re-registered to the
-    // appropriate dtype based on the resolved quant method.
+             quant_args_.is_compressed_tensors_w8a8_dynamic() ||
+             is_w8a8_dynamic_quantize_type_or_method(quant_args_)) {
+    // quant_descs is not empty or W8A8_DYNAMIC: default initialize weight as
+    // kInt8. During load_state_dict, the weight will be lazily re-registered
+    // to the appropriate dtype based on the resolved quant method.
     weight_ = register_parameter(
         "weight",
         torch::empty({out_features_per_partition, hidden_size},
@@ -1371,10 +1411,11 @@ RowParallelLinearImpl::RowParallelLinearImpl(
                              /*requires_grad=*/false);
     }
   } else if (!quant_args_.quant_descs().empty() ||
-             quant_args_.is_compressed_tensors_w8a8_dynamic()) {
-    // quant_descs is not empty: default initialize weight as kInt8.
-    // During load_state_dict, the weight will be lazily re-registered to the
-    // appropriate dtype based on the resolved quant method.
+             quant_args_.is_compressed_tensors_w8a8_dynamic() ||
+             is_w8a8_dynamic_quantize_type_or_method(quant_args_)) {
+    // quant_descs is not empty or W8A8_DYNAMIC: default initialize weight as
+    // kInt8. During load_state_dict, the weight will be lazily re-registered
+    // to the appropriate dtype based on the resolved quant method.
     weight_ = register_parameter(
         "weight",
         torch::empty({out_features, in_features_per_partition},
@@ -1596,10 +1637,11 @@ ReplicatedLinearImpl::ReplicatedLinearImpl(
       output_dtype_(c10::typeMetaToScalarType(options.dtype())) {
   (void)linear_extra_args;
   if (!quant_args_.quant_descs().empty() ||
-      quant_args_.is_compressed_tensors_w8a8_dynamic()) {
-    // quant_descs is not empty: default initialize weight as kInt8.
-    // During load_state_dict, the weight will be lazily re-registered to the
-    // appropriate dtype based on the resolved quant method.
+      quant_args_.is_compressed_tensors_w8a8_dynamic() ||
+      is_w8a8_dynamic_quantize_type_or_method(quant_args_)) {
+    // quant_descs is not empty or W8A8_DYNAMIC: default initialize weight as
+    // kInt8. During load_state_dict, the weight will be lazily re-registered
+    // to the appropriate dtype based on the resolved quant method.
     weight_ = register_parameter(
         "weight",
         torch::empty({out_features, in_features}, options.dtype(torch::kInt8)),

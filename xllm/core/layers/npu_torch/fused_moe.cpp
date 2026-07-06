@@ -91,8 +91,19 @@ std::optional<std::string> resolve_moe_quant_method(
         quantize_type.end(),
         quantize_type.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (quantize_type == "w4a8_dynamic") {
+    if (quantize_type == "w4a8_dynamic" || quantize_type == "w8a8_dynamic") {
       first_quant = quantize_type;
+    }
+  }
+  if (!first_quant.has_value()) {
+    std::string quant_method = quant_args.quant_method();
+    std::transform(
+        quant_method.begin(),
+        quant_method.end(),
+        quant_method.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (quant_method == "w8a8_dynamic" || quant_method == "w4a8_dynamic") {
+      first_quant = quant_method;
     }
   }
   return first_quant;

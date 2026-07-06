@@ -61,7 +61,8 @@ MiniMaxM2AttentionImpl::MiniMaxM2AttentionImpl(const ModelContext& context) {
                                                        /*bias=*/false,
                                                        /*gather_output=*/false,
                                                        parallel_args,
-                                                       options));
+                                                       options,
+                                                       quant_args));
 
   o_proj_ =
       register_module("o_proj",

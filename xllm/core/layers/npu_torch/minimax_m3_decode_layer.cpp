@@ -137,8 +137,9 @@ StateDict prepare_m3_layer_state_dict(
     bool remap_moe_names,
     bool enable_weight_dequant,
     bool use_e8m0_scale,
-    const std::array<int64_t, 2>& weight_block_size) {
-  if (!remap_moe_names && !enable_weight_dequant) {
+    const std::array<int64_t, 2>& weight_block_size,
+    bool enable_w8a8_dequant) {
+  if (!remap_moe_names && !enable_weight_dequant && !enable_w8a8_dequant) {
     return state_dict;
   }
 
@@ -147,10 +148,54 @@ StateDict prepare_m3_layer_state_dict(
   remapped.reserve(state_dict.size());
   std::unordered_map<std::string, torch::Tensor> pending_fp8_weights;
   std::unordered_map<std::string, torch::Tensor> pending_fp8_scales;
+  std::unordered_map<std::string, torch::Tensor> pending_w8a8_weights;
+  std::unordered_map<std::string, torch::Tensor> pending_w8a8_scales;
 
   for (const auto& [name, tensor] : state_dict) {
     const std::string mapped_name =
         remap_moe_names ? remap_moe_weight_name(name) : name;
+
+    // W8A8 load-time dequant for MoE/MLP weights only (attention stays W8A8).
+    // FusedMoE dequant_swiglu_quant kernel doesn't support swigluoai,
+    // so MoE weights are dequantized to BF16 at load time.
+    if (enable_w8a8_dequant && absl::StrContains(mapped_name, "mlp.")) {
+      if (absl::EndsWith(mapped_name, ".weight_scale") &&
+          !absl::EndsWith(mapped_name, ".weight_scale_inv") &&
+          !absl::EndsWith(mapped_name, ".weight_scale_second")) {
+        const std::string paired_weight_name =
+            mapped_name.substr(0, mapped_name.size() - 6);  // strip ".scale"
+        auto pending_weight = pending_w8a8_weights.find(paired_weight_name);
+        if (pending_weight != pending_w8a8_weights.end()) {
+          remapped.emplace(paired_weight_name,
+                           pending_weight->second.to(torch::kBFloat16) *
+                               tensor.to(torch::kBFloat16));
+          pending_w8a8_weights.erase(pending_weight);
+        } else {
+          pending_w8a8_scales.emplace(mapped_name, tensor);
+        }
+        continue;
+      }
+
+      if (absl::EndsWith(mapped_name, ".weight") &&
+          tensor.scalar_type() == torch::kInt8) {
+        const std::string scale_name = mapped_name + "_scale";
+        auto pending_scale = pending_w8a8_scales.find(scale_name);
+        if (pending_scale != pending_w8a8_scales.end()) {
+          remapped.emplace(mapped_name,
+                           tensor.to(torch::kBFloat16) *
+                               pending_scale->second.to(torch::kBFloat16));
+          pending_w8a8_scales.erase(pending_scale);
+        } else {
+          pending_w8a8_weights.emplace(mapped_name, tensor);
+        }
+        continue;
+      }
+
+      if (absl::EndsWith(mapped_name, ".weight_offset")) {
+        continue;  // weight_offset not needed after dequant
+      }
+    }
+
     if (enable_weight_dequant) {
       if (absl::EndsWith(mapped_name, ".weight_scale_inv")) {
         const std::string paired_weight_name = mapped_name.substr(
@@ -190,6 +235,12 @@ StateDict prepare_m3_layer_state_dict(
     remapped.emplace(mapped_name, tensor);
   }
 
+  if (enable_w8a8_dequant) {
+    CHECK(pending_w8a8_weights.empty() && pending_w8a8_scales.empty())
+        << "Unpaired MiniMax-M3 w8a8 weight/scale tensors detected: "
+        << "pending_weights=" << pending_w8a8_weights.size()
+        << ", pending_scales=" << pending_w8a8_scales.size();
+  }
   if (enable_weight_dequant) {
     CHECK(pending_fp8_weights.empty() && pending_fp8_scales.empty())
         << "Unpaired MiniMax-M3 fp8 weight/scale tensors detected: "
@@ -210,6 +261,22 @@ MiniMaxM3DecoderLayerImpl::MiniMaxM3DecoderLayerImpl(
   enable_weight_dequant_ =
       is_load_time_dequant_method(quant_args.quant_method());
   use_e8m0_scale_ = quant_args.quant_method() == kQuantMethodMxfp8;
+  // W8A8 fused MoE kernel requires silu/swiglu; for swigluoai, dequantize
+  // W8A8 weights to BF16 at load time and use the standard forward path.
+  enable_w8a8_dequant_ = !enable_weight_dequant_ &&
+                         (quant_args.quant_method() == kQuantMethodAscendInt8 ||
+                          quant_args.quantize_type() == "w8a8_dynamic") &&
+                         model_args.hidden_act() != "silu" &&
+                         model_args.hidden_act() != "swiglu";
+  if (enable_w8a8_dequant_) {
+    // Clear quant args locally so that FusedMoE/DenseMLP (constructed below
+    // with this local copy) don't try to use the W8A8 forward path —
+    // dequant_swiglu_quant kernel is incompatible with swigluoai.
+    // Attention layers keep W8A8 (their linear forward is fine).
+    quant_args.quant_method("");
+    quant_args.quantize_type().clear();
+    quant_args.quant_descs().clear();
+  }
   if (enable_weight_dequant_) {
     if (quant_args.weight_block_size().size() == 2 &&
         quant_args.weight_block_size()[0] > 0 &&
@@ -292,7 +359,8 @@ void MiniMaxM3DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
                                   is_moe_layer_,
                                   enable_weight_dequant_,
                                   use_e8m0_scale_,
-                                  weight_block_size_);
+                                  weight_block_size_,
+                                  enable_w8a8_dequant_);
 
   attention_->load_state_dict(
       prepared_state_dict.get_dict_with_prefix("self_attn."));
