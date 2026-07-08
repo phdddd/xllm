@@ -961,7 +961,13 @@ void ProfileManager::warmup_decode_for_graph() {
   auto& model_args = engine_->model_args();
   int32_t max_context_len = model_args.max_position_embeddings();
   int32_t max_seqs_per_batch = options_.max_seqs_per_batch();
-  int32_t decode_seq_len = std::min(16, max_context_len);
+  // The captured decode graph freezes the KV traversal length, so it must
+  // cover the max sequence length that graph mode is allowed to replay.
+  // Using a small fixed value (e.g. 16) truncates KV reads for longer
+  // sequences and corrupts the output. Align it with the graph-mode token
+  // budget instead.
+  int32_t decode_seq_len =
+      std::min(FLAGS_max_tokens_for_graph_mode, max_context_len);
 
   std::vector<int32_t> decode_batch_sizes =
       graph_decode_buckets(max_seqs_per_batch, options_.dp_size());
