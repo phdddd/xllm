@@ -109,7 +109,8 @@ MiniMaxM3AttentionImpl::MiniMaxM3AttentionImpl(const ModelContext& context,
                                                        /*bias=*/false,
                                                        /*gather_output=*/false,
                                                        parallel_args,
-                                                       options));
+                                                       options,
+                                                       quant_args));
 
   use_sparse_attention_ = is_minimax_sparse_layer(args, layer_id);
   if (use_sparse_attention_) {
@@ -337,6 +338,21 @@ void MiniMaxM3AttentionImpl::write_index_cache(
   CHECK(index_cache.defined())
       << "MiniMax-M3 sparse attention requires index cache.";
   torch::Tensor slot_mapping = attn_metadata.slot_mapping.to(torch::kInt64);
+
+  if (!attn_metadata.is_prefill) {
+    // Decode phase: all slots are guaranteed valid (no -1 padding).
+    // Avoid torch::nonzero which is a dynamic-shape op incompatible with
+    // ACL graph capture (aclnnNonzero requires stream sync).
+    torch::Tensor all_index_key =
+        index_key.view({-1, 1, sparse_index_dim_}).contiguous();
+    torch::Tensor flat_index_cache =
+        index_cache.view({-1, 1, sparse_index_dim_});
+    flat_index_cache.index_copy_(/*dim=*/0, slot_mapping, all_index_key);
+    return;
+  }
+
+  // Prefill phase: slot_mapping may contain -1 for padding positions.
+  // nonzero is safe here because prefill does not use graph capture.
   torch::Tensor valid_positions =
       torch::nonzero(slot_mapping >= 0).flatten().to(torch::kInt64);
   if (valid_positions.numel() == 0) {

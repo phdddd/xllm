@@ -122,7 +122,8 @@ class MiniMaxM2MoeDecoderLayerImpl : public torch::nn::Module {
           << ", pending_scales=" << pending_fp8_scales.size();
     }
 
-    layer_->load_state_dict(StateDict(std::move(remapped)));
+    layer_->load_state_dict(
+        StateDict(std::move(remapped), std::string(state_dict.prefix())));
   }
 
  private:

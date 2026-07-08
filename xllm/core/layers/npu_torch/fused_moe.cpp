@@ -91,8 +91,19 @@ std::optional<std::string> resolve_moe_quant_method(
         quantize_type.end(),
         quantize_type.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (quantize_type == "w4a8_dynamic") {
+    if (quantize_type == "w4a8_dynamic" || quantize_type == "w8a8_dynamic") {
       first_quant = quantize_type;
+    }
+  }
+  if (!first_quant.has_value()) {
+    std::string quant_method = quant_args.quant_method();
+    std::transform(
+        quant_method.begin(),
+        quant_method.end(),
+        quant_method.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (quant_method == "w8a8_dynamic" || quant_method == "w4a8_dynamic") {
+      first_quant = quant_method;
     }
   }
   return first_quant;
@@ -905,6 +916,11 @@ torch::Tensor FusedMoEImpl::forward_expert(
     params.activate_left = true;
     params.quant_mode = 1;
     apply_ds_v4_dequant_swiglu_quant_v2_params(params, swiglu_limit_);
+    // swigluoai (MiniMax-M3): y = (up + 1) * gate * sigmoid(gate * 1.702)
+    if (hidden_act_ == "swigluoai") {
+      params.glu_alpha = 1.702;
+      params.glu_bias = 1.0;
+    }
     std::tie(act_quantized, act_scale) =
         xllm::kernel::dequant_swiglu_quant(params);
 
@@ -1478,6 +1494,11 @@ torch::Tensor FusedMoEImpl::forward_with_selected_experts_ep2(
     params.activate_left = true;
     params.quant_mode = 1;
     apply_ds_v4_dequant_swiglu_quant_v2_params(params, swiglu_limit_);
+    // swigluoai (MiniMax-M3): y = (up + 1) * gate * sigmoid(gate * 1.702)
+    if (hidden_act_ == "swigluoai") {
+      params.glu_alpha = 1.702;
+      params.glu_bias = 1.0;
+    }
     std::tie(act_quantized, act_scale) =
         xllm::kernel::dequant_swiglu_quant(params);
 

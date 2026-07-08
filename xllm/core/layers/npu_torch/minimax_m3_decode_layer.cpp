@@ -137,7 +137,8 @@ StateDict prepare_m3_layer_state_dict(
     bool remap_moe_names,
     bool enable_weight_dequant,
     bool use_e8m0_scale,
-    const std::array<int64_t, 2>& weight_block_size) {
+    const std::array<int64_t, 2>& weight_block_size,
+    bool) {
   if (!remap_moe_names && !enable_weight_dequant) {
     return state_dict;
   }
@@ -151,6 +152,7 @@ StateDict prepare_m3_layer_state_dict(
   for (const auto& [name, tensor] : state_dict) {
     const std::string mapped_name =
         remap_moe_names ? remap_moe_weight_name(name) : name;
+
     if (enable_weight_dequant) {
       if (absl::EndsWith(mapped_name, ".weight_scale_inv")) {
         const std::string paired_weight_name = mapped_name.substr(
@@ -292,7 +294,8 @@ void MiniMaxM3DecoderLayerImpl::load_state_dict(const StateDict& state_dict) {
                                   is_moe_layer_,
                                   enable_weight_dequant_,
                                   use_e8m0_scale_,
-                                  weight_block_size_);
+                                  weight_block_size_,
+                                  false);
 
   attention_->load_state_dict(
       prepared_state_dict.get_dict_with_prefix("self_attn."));
